@@ -46,13 +46,13 @@ class OKXNativeClient:
         secret_key: str = "",
         passphrase: str = "",
         simulated_demo: bool = True,
-        base_url: str = "https://www.okx.com",
+        base_url: str = "https://eea.okx.com",
     ):
         self.api_key = api_key or os.environ.get("OKX_API_KEY", "")
         self.secret_key = secret_key or os.environ.get("OKX_SECRET_KEY", "")
         self.passphrase = passphrase or os.environ.get("OKX_PASSPHRASE", "")
         self.simulated_demo = simulated_demo
-        self.base_url = base_url.rstrip("/")
+        self.base_url = (os.environ.get("OKX_BASE_URL") or base_url).rstrip("/")
 
     @property
     def is_authenticated(self) -> bool:
