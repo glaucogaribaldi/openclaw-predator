@@ -113,9 +113,14 @@ def run_predator_cycle(
     balances = client.get_account_balances() if client.is_authenticated else []
     open_orders = client.get_open_orders() if client.is_authenticated else []
 
-    nav_usdc = sum(float(b.get("eqUsd") or 0.0) for b in balances) if balances else 1000.0
+    tracked_ccys = {m["coin"] for m in DEFAULT_UNIVERSE.values()} | {"USDC"}
+    nav_usdc = (
+        sum(float(b.get("eqUsd") or 0.0) for b in balances if b.get("ccy") in tracked_ccys)
+        if balances
+        else 1000.0
+    )
     free_usdc = (
-        sum(float(b.get("availBal") or 0.0) for b in balances if b.get("ccy") in ("USDC", "USDT"))
+        sum(float(b.get("availBal") or 0.0) for b in balances if b.get("ccy") == "USDC")
         if balances
         else 850.0
     )
