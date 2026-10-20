@@ -31,14 +31,15 @@ from execution.okx_hybrid_executor import OKXNativeClient
 
 
 DEFAULT_UNIVERSE: Dict[str, Dict[str, Any]] = {
-    "SOL-USDC":    {"coin": "SOL",    "dec_px": 2, "dec_sz": 3},
-    "SUI-USDC":    {"coin": "SUI",    "dec_px": 4, "dec_sz": 1},
-    "NEAR-USDC":   {"coin": "NEAR",   "dec_px": 3, "dec_sz": 1},
-    "RENDER-USDC": {"coin": "RENDER", "dec_px": 3, "dec_sz": 2},
-    "FET-USDC":    {"coin": "FET",    "dec_px": 4, "dec_sz": 1},
-    "AVAX-USDC":   {"coin": "AVAX",   "dec_px": 3, "dec_sz": 2},
-    "SEI-USDC":    {"coin": "SEI",    "dec_px": 4, "dec_sz": 1},
-    "LINK-USDC":   {"coin": "LINK",   "dec_px": 3, "dec_sz": 2},
+    "SOL-USDC":  {"coin": "SOL",  "dec_px": 1, "dec_sz": 3},
+    "SUI-USDC":  {"coin": "SUI",  "dec_px": 4, "dec_sz": 2},
+    "NEAR-USDC": {"coin": "NEAR", "dec_px": 3, "dec_sz": 2},
+    "LINK-USDC": {"coin": "LINK", "dec_px": 3, "dec_sz": 2},
+    "HYPE-USDC": {"coin": "HYPE", "dec_px": 2, "dec_sz": 2},
+    "WLD-USDC":  {"coin": "WLD",  "dec_px": 4, "dec_sz": 1},
+    "ONDO-USDC": {"coin": "ONDO", "dec_px": 4, "dec_sz": 1},
+    "DOGE-USDC": {"coin": "DOGE", "dec_px": 4, "dec_sz": 1},
+    "ARB-USDC":  {"coin": "ARB",  "dec_px": 3, "dec_sz": 1},
 }
 
 
