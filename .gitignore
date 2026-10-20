@@ -1,0 +1,22 @@
+# Python & Virtualenv
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# Secrets & Credentials (NEVER COMMIT)
+.env
+*.key
+*secret*
+*credentials*.json
+config/okx_demo.toml
+
+# Runtime Databases & Logs
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/rls_model_state.json
+logs/
+*.log
+.DS_Store
