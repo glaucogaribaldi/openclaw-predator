@@ -64,9 +64,10 @@ def load_dotenv(env_path: str) -> Dict[str, str]:
 
 def init_predator_db(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=30000;")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS microstructure_telemetry (
@@ -190,6 +191,9 @@ def run_predator_cycle(
     profit_lock_repegs = 0
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    telemetry_tuples: List[tuple] = []
+    order_tuples: List[tuple] = []
+
     # 1. Scan all instruments in universe
     for inst_id, meta in DEFAULT_UNIVERSE.items():
         try:
@@ -260,14 +264,7 @@ def run_predator_cycle(
         }
         telemetry_rows.append(row_dict)
 
-        conn.execute(
-            """
-            INSERT INTO microstructure_telemetry (
-                timestamp, inst_id, mid_price, micro_price, spread_bps,
-                obi_top5, ofi_norm, vpin_toxicity, hawkes_net_burst, composite_alpha,
-                predicted_return_bps, kalman_velocity_bps, confidence, regime
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+        telemetry_tuples.append(
             (
                 now_iso,
                 inst_id,
@@ -283,7 +280,7 @@ def run_predator_cycle(
                 pred.kalman_velocity_bps,
                 pred.confidence,
                 pred.regime,
-            ),
+            )
         )
 
         # 2. Audit & Self-Heal Active Orders (Stale BUY Chaser + Cost-Basis Floor + Profit-Lock Re-Peg)
@@ -323,8 +320,12 @@ def run_predator_cycle(
                             "new_floor_px": cost_floor_px,
                         })
                     # AUDIT SAFEGUARD 2: Dynamic Profit-Lock Re-Pegging
-                    # If position is in strong profit (>= +180 bps) and order is still far (> 30 bps) while momentum slows
-                    elif unrealized_bps >= 180.0 and drift_bps > 30.0 and pred.predicted_return_bps < 5.0:
+                    # Tier 1: Unrealized >= +85 bps and order > 12 bps away -> re-peg tight (+5 bps above mid)
+                    # Tier 2: Unrealized >= +180 bps and order > 8 bps away -> re-peg ultra-tight at best ask
+                    elif (
+                        (unrealized_bps >= 180.0 and drift_bps > 8.0)
+                        or (unrealized_bps >= 85.0 and drift_bps > 12.0 and pred.predicted_return_bps < 6.0)
+                    ):
                         client.cancel_order(inst_id, ord_id)
                         has_sell_order = False
                         avail_token_qty = cash_token_qty
@@ -341,9 +342,13 @@ def run_predator_cycle(
         # 3A. Place Take-Profit SELL orders enforcing Cost-Basis Floor & Profit-Lock
         if not has_sell_order and avail_token_qty * sig.mid_price >= 10.0:
             sell_sz = math.floor(avail_token_qty * (10 ** dec_sz)) / (10 ** dec_sz)
-            if unrealized_bps >= 180.0 and pred.predicted_return_bps < 5.0:
-                # Tight profit-harvesting just above best ask (+12 bps) to lock in large unrealized gain
-                raw_tp_px = sig.mid_price * 1.0012
+            if unrealized_bps >= 180.0:
+                # Ultra-tight top-of-book Ask join to harvest large unrealized profit immediately at 0% maker fee
+                raw_tp_px = asks[0][0]
+                tp_style_tag = "PROFIT_LOCK_ASK_JOIN"
+            elif unrealized_bps >= 85.0 and pred.predicted_return_bps < 6.0:
+                # Tight profit-harvesting (+5 bps)
+                raw_tp_px = sig.mid_price * 1.0005
                 tp_style_tag = "PROFIT_LOCK_TP"
             else:
                 raw_tp_px = sig.mid_price * (1.0 + pred.recommended_sell_tp_bps / 10000.0)
@@ -405,13 +410,7 @@ def run_predator_cycle(
             if ord_id_placed:
                 free_usdc = max(0.0, free_usdc - lot_usd)
 
-            conn.execute(
-                """
-                INSERT INTO predator_orders (
-                    timestamp, inst_id, side, execution_style, size, price,
-                    predicted_bps, regime, ord_id, mode
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+            order_tuples.append(
                 (
                     now_iso,
                     inst_id,
@@ -423,7 +422,7 @@ def run_predator_cycle(
                     pred.regime,
                     ord_id_placed,
                     mode_str,
-                ),
+                )
             )
             actions_taken.append(
                 {
@@ -438,7 +437,33 @@ def run_predator_cycle(
                 }
             )
 
-    conn.commit()
+    # Commit all telemetry and order rows in a single fast atomic transaction (prevents SQLite lock across HTTP calls)
+    try:
+        if telemetry_tuples:
+            conn.executemany(
+                """
+                INSERT INTO microstructure_telemetry (
+                    timestamp, inst_id, mid_price, micro_price, spread_bps,
+                    obi_top5, ofi_norm, vpin_toxicity, hawkes_net_burst, composite_alpha,
+                    predicted_return_bps, kalman_velocity_bps, confidence, regime
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                telemetry_tuples,
+            )
+        if order_tuples:
+            conn.executemany(
+                """
+                INSERT INTO predator_orders (
+                    timestamp, inst_id, side, execution_style, size, price,
+                    predicted_bps, regime, ord_id, mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                order_tuples,
+            )
+        conn.commit()
+    except Exception as e:
+        print(f"[!] SQLite commit warning: {e}")
+
     pred_engine.save_state()
 
     debate_res = None
