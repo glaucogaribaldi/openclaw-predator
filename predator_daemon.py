@@ -25,6 +25,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
 from agents.llm_council import AdversarialLLMCouncil
+from core.kronos_oracle import KronosOracleClient
 from core.microstructure import MicrostructureEngine
 from core.predictor import PredatorPredictiveEngine
 from execution.okx_hybrid_executor import OKXNativeClient
@@ -107,12 +108,14 @@ def run_predator_cycle(
     client: OKXNativeClient,
     micro_engine: MicrostructureEngine,
     pred_engine: PredatorPredictiveEngine,
+    kronos_client: KronosOracleClient,
     council: AdversarialLLMCouncil,
     conn: sqlite3.Connection,
     run_llm_debate: bool = False,
 ) -> Dict[str, Any]:
     balances = client.get_account_balances() if client.is_authenticated else []
     open_orders = client.get_open_orders() if client.is_authenticated else []
+    kronos_forecasts = kronos_client.fetch_forecasts(list(DEFAULT_UNIVERSE.keys()))
 
     tracked_ccys = {m["coin"] for m in DEFAULT_UNIVERSE.values()} | {"USDC"}
     nav_usdc = (
@@ -161,7 +164,19 @@ def run_predator_cycle(
         inv_weight = (token_eq / nav_usdc) if nav_usdc > 0 else 0.0
         llm_bias = float(convictions.get(inst_id, 0.0))
 
-        pred = pred_engine.evaluate(sig, inventory_weight_nav=inv_weight, llm_conviction_bias=llm_bias)
+        k_fc = kronos_forecasts.get(inst_id)
+        k_ret_bps = k_fc.expected_return_1h_bps if k_fc else 0.0
+        k_up_bps = k_fc.upside_high_bps if k_fc else 0.0
+        k_down_bps = k_fc.downside_low_bps if k_fc else 0.0
+
+        pred = pred_engine.evaluate(
+            sig,
+            inventory_weight_nav=inv_weight,
+            llm_conviction_bias=llm_bias,
+            kronos_return_1h_bps=k_ret_bps,
+            kronos_upside_bps=k_up_bps,
+            kronos_downside_bps=k_down_bps,
+        )
 
         row_dict = {
             "inst_id": inst_id,
@@ -173,6 +188,9 @@ def run_predator_cycle(
             "vpin_toxicity": sig.vpin_toxicity,
             "hawkes_net_burst": sig.hawkes_net_burst,
             "composite_alpha": sig.composite_alpha,
+            "kronos_1h_bps": round(k_ret_bps, 2),
+            "kronos_high_bps": round(k_up_bps, 2),
+            "kronos_low_bps": round(k_down_bps, 2),
             "predicted_return_bps": pred.predicted_return_bps,
             "kalman_velocity_bps": pred.kalman_velocity_bps,
             "confidence": pred.confidence,
@@ -362,6 +380,7 @@ def main() -> None:
     client = OKXNativeClient(simulated_demo=simulated_demo)
     micro_engine = MicrostructureEngine(bucket_volume_usd=2500.0)
     pred_engine = PredatorPredictiveEngine(state_path=os.path.join(BASE_DIR, "data", "rls_model_state.json"))
+    kronos_client = KronosOracleClient()
     council = AdversarialLLMCouncil(
         directive_out_path=os.path.join(BASE_DIR, "config", "predator_llm_directive.json")
     )
@@ -372,28 +391,29 @@ def main() -> None:
             client=client,
             micro_engine=micro_engine,
             pred_engine=pred_engine,
+            kronos_client=kronos_client,
             council=council,
             conn=conn,
             run_llm_debate=args.debate,
         )
-        print("=== TRE PREDATOR v1.0 TELEMETRY & PREDICTION REPORT ===")
+        print("=== TRE PREDATOR v1.1 (KRONOS-SMALL GPU + OFI/VPIN/RLS) TELEMETRY REPORT ===")
         print(
             f"Timestamp: {summary['timestamp']} | Mode: "
             f"{'OKX_DEMO (x-simulated-trading:1)' if summary['simulated_demo'] else 'OKX_LIVE'} | "
             f"Auth: {'ACTIVE' if summary['authenticated'] else 'DRY_RUN_PUBLIC_FEED'}"
         )
-        print("-" * 108)
+        print("-" * 118)
         print(
-            f"{'INST_ID':<12} {'MID_PX':<10} {'OFI':<8} {'VPIN':<7} {'HAWKES':<8} "
-            f"{'ALPHA':<8} {'PRED_BPS':<10} {'CONF':<7} {'REGIME':<22} {'BUY_BPS':<8} {'TP_BPS'}"
+            f"{'INST_ID':<12} {'MID_PX':<10} {'OFI':<7} {'VPIN':<6} "
+            f"{'KRONOS_1H':<11} {'PRED_BPS':<10} {'CONF':<6} {'REGIME':<22} {'BUY_BPS':<8} {'TP_BPS'}"
         )
-        print("-" * 108)
+        print("-" * 118)
         for t in summary["telemetry"]:
             print(
-                f"{t['inst_id']:<12} ${t['mid_price']:<9} {t['ofi_norm']:>+6.2f}  "
-                f"{t['vpin_toxicity']:<6.2f} {t['hawkes_net_burst']:>+6.2f}  "
-                f"{t['composite_alpha']:>+6.2f}  {t['predicted_return_bps']:>+7.2f}bps "
-                f"{t['confidence']:<6.2f} {t['regime']:<22} -{t['buy_offset_bps']:<6.1f} +{t['sell_tp_bps']:.1f}"
+                f"{t['inst_id']:<12} ${t['mid_price']:<9} {t['ofi_norm']:>+5.2f}  "
+                f"{t['vpin_toxicity']:<5.2f} {t['kronos_1h_bps']:>+7.2f}bps  "
+                f"{t['predicted_return_bps']:>+7.2f}bps "
+                f"{t['confidence']:<5.2f} {t['regime']:<22} -{t['buy_offset_bps']:<6.1f} +{t['sell_tp_bps']:.1f}"
             )
         if summary["llm_debate"]:
             deb = summary["llm_debate"]
@@ -415,6 +435,7 @@ def main() -> None:
                 client=client,
                 micro_engine=micro_engine,
                 pred_engine=pred_engine,
+                kronos_client=kronos_client,
                 council=council,
                 conn=conn,
                 run_llm_debate=do_debate,

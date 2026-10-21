@@ -209,6 +209,9 @@ class PredatorPredictiveEngine:
         sig: MicrostructureSignal,
         inventory_weight_nav: float = 0.0,
         llm_conviction_bias: float = 0.0,
+        kronos_return_1h_bps: float = 0.0,
+        kronos_upside_bps: float = 0.0,
+        kronos_downside_bps: float = 0.0,
     ) -> PredictionOutput:
         inst = sig.inst_id
         if inst not in self.kalman_filters:
@@ -229,12 +232,17 @@ class PredatorPredictiveEngine:
         ]
         raw_pred_bps, hit_rate = self.rls_models[inst].update_and_predict(features, sig.mid_price)
 
-        # Blend online RLS prediction with LLM Multi-Agent conviction bias (in bps)
-        blended_pred_bps = 0.75 * raw_pred_bps + 0.25 * (llm_conviction_bias * 25.0)
+        # Blend online RLS microstructure prediction (50%) + Kronos-small K-line Transformer (30%) + LLM Council (20%)
+        blended_pred_bps = (
+            0.50 * raw_pred_bps
+            + 0.30 * kronos_return_1h_bps
+            + 0.20 * (llm_conviction_bias * 25.0)
+        )
 
-        # Confidence combines model hit-rate and signal magnitude coherence
+        # Confidence combines model hit-rate, signal magnitude, and Kronos-microstructure directional agreement
         signal_strength = min(1.0, abs(sig.composite_alpha) * 1.35)
-        confidence = round(min(0.98, max(0.35, 0.55 * hit_rate + 0.45 * signal_strength)), 4)
+        kronos_agreement = 0.08 if (raw_pred_bps * kronos_return_1h_bps > 0) else 0.0
+        confidence = round(min(0.98, max(0.35, 0.50 * hit_rate + 0.42 * signal_strength + kronos_agreement)), 4)
 
         # Determine Regime & Dynamic Offsets (in bps; 100 bps = 1.00%)
         # Inventory skew penalty (Cartea-Jaimungal): high inventory lowers TP and widens buy offset
@@ -242,31 +250,34 @@ class PredatorPredictiveEngine:
 
         allow_sniper_ioc = False
         if (
-            blended_pred_bps >= 16.0
-            and sig.composite_alpha >= 0.58
+            blended_pred_bps >= 14.0
+            and sig.composite_alpha >= 0.55
             and sig.vpin_toxicity < 0.72
-            and confidence >= 0.65
+            and confidence >= 0.62
             and inventory_weight_nav < 0.18
         ):
             regime = "AGGRESSIVE_BREAKOUT"
-            # Join top of book or trigger IOC Sniper if breakout is strong
             buy_offset_bps = max(2.0, 6.0 + inv_skew_bps * 0.5)
-            sell_tp_bps = max(25.0, min(95.0, 42.0 + blended_pred_bps * 1.2 - inv_skew_bps))
+            base_tp = max(25.0, kronos_upside_bps * 0.85) if kronos_upside_bps > 0 else 42.0
+            sell_tp_bps = max(25.0, min(95.0, base_tp + blended_pred_bps * 0.8 - inv_skew_bps))
             allow_sniper_ioc = True
         elif sig.vpin_toxicity >= 0.68 and sig.composite_alpha < -0.30:
             regime = "TOXIC_DIP_DEFENSE"
-            # High informed selling toxicity: pull buy traps much deeper (-0.85% to -1.50%) to catch panic wick
-            buy_offset_bps = max(65.0, min(160.0, 85.0 + abs(blended_pred_bps) * 1.5 + inv_skew_bps))
+            k_down = max(65.0, kronos_downside_bps * 1.15) if kronos_downside_bps > 0 else 85.0
+            buy_offset_bps = max(65.0, min(160.0, k_down + abs(blended_pred_bps) * 1.0 + inv_skew_bps))
             sell_tp_bps = max(18.0, 28.0 - inv_skew_bps * 0.6)
         elif abs(blended_pred_bps) <= 6.5 and sig.vpin_toxicity < 0.45:
             regime = "ACTIVE_SCALP_MM"
-            # Tight rapid-turnover market making (15-22 bps buy offset, 25-35 bps TP)
-            buy_offset_bps = max(12.0, 18.0 - blended_pred_bps * 0.5 + inv_skew_bps)
-            sell_tp_bps = max(20.0, 30.0 + blended_pred_bps * 0.5 - inv_skew_bps)
+            k_down = max(12.0, min(28.0, kronos_downside_bps * 0.65)) if kronos_downside_bps > 0 else 16.0
+            k_up = max(20.0, min(48.0, kronos_upside_bps * 0.80)) if kronos_upside_bps > 0 else 28.0
+            buy_offset_bps = max(10.0, k_down - blended_pred_bps * 0.4 + inv_skew_bps)
+            sell_tp_bps = max(18.0, k_up + blended_pred_bps * 0.4 - inv_skew_bps)
         else:
             regime = "MEAN_REVERSION"
-            buy_offset_bps = max(18.0, 32.0 - blended_pred_bps * 0.6 + inv_skew_bps)
-            sell_tp_bps = max(24.0, 40.0 + blended_pred_bps * 0.7 - inv_skew_bps)
+            k_down = max(16.0, min(55.0, kronos_downside_bps * 0.75)) if kronos_downside_bps > 0 else 28.0
+            k_up = max(22.0, min(70.0, kronos_upside_bps * 0.85)) if kronos_upside_bps > 0 else 38.0
+            buy_offset_bps = max(15.0, k_down - blended_pred_bps * 0.5 + inv_skew_bps)
+            sell_tp_bps = max(20.0, k_up + blended_pred_bps * 0.5 - inv_skew_bps)
 
         return PredictionOutput(
             inst_id=inst,
