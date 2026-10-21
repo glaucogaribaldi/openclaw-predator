@@ -243,9 +243,37 @@ def run_predator_cycle(
 
         buy_sz = round(lot_usd / target_buy_px, dec_sz) if target_buy_px > 0 else 0.0
 
-        # Place or simulate order if no active buy order exists for this instrument
+        # 4A. Place Take-Profit SELL orders if we hold available token inventory
+        avail_token_qty = sum(float(b.get("availBal") or 0.0) for b in balances if b.get("ccy") == coin)
+        has_sell_order = any(str(o.get("side")).lower() == "sell" for o in inst_orders)
+        if not has_sell_order and avail_token_qty * sig.mid_price >= 10.0:
+            sell_sz = math.floor(avail_token_qty * (10 ** dec_sz)) / (10 ** dec_sz)
+            target_sell_px = round(sig.mid_price * (1.0 + pred.recommended_sell_tp_bps / 10000.0), dec_px)
+            if sell_sz > 0 and target_sell_px > 0:
+                res_sell = client.place_spot_order(
+                    inst_id=inst_id,
+                    side="sell",
+                    sz=sell_sz,
+                    px=target_sell_px,
+                    execution_style="PASSIVE_MAKER",
+                )
+                ord_id_sell = ""
+                if isinstance(res_sell.get("data"), list) and res_sell["data"]:
+                    ord_id_sell = str(res_sell["data"][0].get("ordId", ""))
+                actions_taken.append({
+                    "inst_id": inst_id,
+                    "side": "sell",
+                    "style": "PASSIVE_MAKER_TP",
+                    "sz": sell_sz,
+                    "px": target_sell_px,
+                    "pred_bps": pred.predicted_return_bps,
+                    "regime": pred.regime,
+                    "ord_id": ord_id_sell,
+                })
+
+        # 4B. Place or simulate BUY order if no active buy order exists for this instrument
         has_buy_order = any(str(o.get("side")).lower() == "buy" for o in inst_orders)
-        if not has_buy_order and buy_sz > 0:
+        if not has_buy_order and buy_sz > 0 and free_usdc >= 12.0:
             res_place = client.place_spot_order(
                 inst_id=inst_id,
                 side="buy",
