@@ -156,6 +156,10 @@ class OKXNativeClient:
         res = self._request("GET", "/api/v5/trade/orders-pending", params={"instType": inst_type}, auth=True)
         return res.get("data", [])
 
+    def get_recent_fills(self, inst_type: str = "SPOT", limit: int = 50) -> List[Dict[str, Any]]:
+        res = self._request("GET", "/api/v5/trade/fills", params={"instType": inst_type, "limit": str(limit)}, auth=True)
+        return res.get("data", [])
+
     def cancel_order(self, inst_id: str, ord_id: str) -> Dict[str, Any]:
         return self._request(
             "POST",
